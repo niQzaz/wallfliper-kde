@@ -64,3 +64,19 @@ cd <каталог wallfliper-kde>
 ## Что прислать
 Вывод `check_env.sh`, заполненную таблицу и четыре файла из `~/.cache/wallfliper-kde-stage0/`
 (или хотя бы строки `env`, `screen`, `cursor`, `qml-warning`, `load-failed`).
+
+## Повторный тест после исправления (ревизия 2)
+Исправлены ошибки `plain`/`plain-fullscreen` при завершении (см. отчёт). Проверьте именно их:
+
+```
+python3 stage0/selftest.py                          # без Qt, 20 проверок, ожидается ALL CHECKS PASSED
+rm -f ~/.cache/wallfliper-kde-stage0/plain*.log     # чтобы в логах были только новые запуски
+python3 stage0/proto.py --mode plain                # затем Esc
+python3 stage0/proto.py --mode plain-fullscreen     # затем Esc
+python3 stage0/proto.py --mode layer                # контроль: Esc
+grep -c qml-warning ~/.cache/wallfliper-kde-stage0/*.log
+grep -h teardown   ~/.cache/wallfliper-kde-stage0/*.log
+```
+Ожидание (гипотеза, пока не проверена в вашей сессии): в терминале нет `TypeError` и `ValueError`,
+в каждом логе есть `exit code=0`, затем `teardown engine deleted` и `teardown signal notifier deleted`,
+`qml-warning` = 0. Если `qml-warning` не 0 — пришлите строки, теперь они не теряются.

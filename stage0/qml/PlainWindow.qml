@@ -30,5 +30,5 @@ Window {
         }
     }
 
-    Probe { id: scene; anchors.fill: parent; host: win; modeName: probe.modeLabel }
+    Probe { id: scene; anchors.fill: parent; host: win; modeName: probe ? probe.modeLabel : "plain" }
 }

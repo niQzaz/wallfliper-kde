@@ -53,12 +53,53 @@ _log_file = None
 
 
 def log(event: str, detail: str = "") -> None:
+    """Print to stderr and append to the run log. Never raises: it is called from
+    Qt slots and QML handlers, including during teardown after the file is closed."""
     elapsed = (time.monotonic() - _T0) * 1000
-    line = f"[{elapsed:9.1f} ms] {event:<22} {detail}"
-    print(line, file=sys.stderr, flush=True)
-    if _log_file is not None:
-        _log_file.write(json.dumps({"ms": round(elapsed, 1), "event": event, "detail": detail}) + "\n")
-        _log_file.flush()
+    print(f"[{elapsed:9.1f} ms] {event:<22} {detail}", file=sys.stderr, flush=True)
+    handle = _log_file
+    if handle is None or handle.closed:
+        return
+    try:
+        handle.write(json.dumps({"ms": round(elapsed, 1), "event": event, "detail": detail}) + "\n")
+        handle.flush()
+    except (OSError, ValueError):
+        pass
+
+
+def _close_log() -> None:
+    global _log_file
+    handle, _log_file = _log_file, None
+    if handle is not None:
+        try:
+            handle.close()
+        except OSError:
+            pass
+
+
+def _on_qml_warnings(warnings) -> None:
+    """One failing entry must not drop the rest of the batch."""
+    for w in warnings:
+        try:
+            log("qml-warning", w.toString())
+        except Exception as exc:  # noqa: BLE001 - must not propagate into Qt
+            print(f"stage0: could not log a QML warning: {exc!r}", file=sys.stderr)
+
+
+def _teardown(engine, guard) -> None:
+    """Destroy the QML engine (windows, bindings, handlers) while `probe` and the log
+    are still alive. Left to Python's frame cleanup the order is arbitrary: `probe`
+    could vanish first, turning bindings like `probe.modeLabel` into TypeErrors."""
+    try:
+        import shiboken6
+    except ImportError:
+        return
+    if engine is not None:
+        shiboken6.delete(engine)
+        log("teardown", "engine deleted")
+    if guard is not None:
+        shiboken6.delete(guard[2])  # the QSocketNotifier
+        log("teardown", "signal notifier deleted")
 
 
 def _install_signal_quit(app):
@@ -104,6 +145,7 @@ def main() -> int:
         print("stage0: another instance was running; asked it to close (toggle).", file=sys.stderr)
         return 0
 
+    engine = guard = None
     try:
         _log_file = open(cache / f"{args.mode}.log", "a", encoding="utf-8")
         log("start", f"mode={args.mode} screen={args.screen} pid={os.getpid()}")
@@ -146,7 +188,7 @@ def main() -> int:
                       f"screenAt={cursor_screen.name() if cursor_screen else None}")
 
         engine = QQmlApplicationEngine()
-        engine.warnings.connect(lambda ws: [log("qml-warning", w.toString()) for w in ws])
+        engine.warnings.connect(_on_qml_warnings)
         probe = Probe(args.mode)
         engine.rootContext().setContextProperty("probe", probe)
         engine.load(QUrl.fromLocalFile(str(Path(__file__).resolve().parent / "qml" / _QML[args.mode])))
@@ -178,12 +220,11 @@ def main() -> int:
                               lambda: (log("watchdog-quit", f"{args.timeout}s"), app.quit()))
         code = app.exec()
         log("exit", f"code={code}")
-        del guard
         return code
     finally:
+        _teardown(engine, guard)
         lock.release()
-        if _log_file is not None:
-            _log_file.close()
+        _close_log()
 
 
 if __name__ == "__main__":
