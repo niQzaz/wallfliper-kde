@@ -1,0 +1,19 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+*.egg-info/
+dist/
+build/
+
+# Editor settings (machine-local)
+.vscode/
+
+# Working notes kept local, not published
+CONTEXT.md
+
+# AUR packaging — kept local while AUR is offline (security incident)
+PKGBUILD
+PKGBUILD-git
+*.SRCINFO
+.SRCINFO
