@@ -7,7 +7,9 @@ import QtQuick
 //   wallpapers   list of { name, path, url }
 //   emptyDetail  why the list is empty ("" when it is not)
 //   emptyHint    what the user can do about it
-//   controller   slots: log(event, detail), close(), confirm(index) -> "" or a message
+//   controller   slots: log(event, detail), close(), confirm(index) -> "" or a message;
+//                signal: applyFailed(message). confirm() returning "" means an apply was
+//                started: the app quits on success, applyFailed arrives on failure.
 //
 // Style follows the upstream DESIGN.md: flat, monochrome, square corners, 2px white
 // frame as the selection language, no shadows, no gradients.
@@ -23,6 +25,8 @@ FocusScope {
     property alias currentIndex: list.currentIndex
     readonly property rect panelRect: Qt.rect(panel.x, panel.y, panel.width, panel.height)
     property string notice: ""
+    // True from the moment an apply was started until it fails (on success the app quits).
+    property bool applying: false
 
     // Tokens (same values as upstream Theme.qml).
     readonly property string fontFamily:
@@ -52,8 +56,18 @@ FocusScope {
         if (root.count === 0)
             return
         const message = controller.confirm(index)
-        if (message !== "")
+        if (message === "")
+            root.applying = true
+        else
             root.notice = message
+    }
+
+    Connections {
+        target: controller
+        function onApplyFailed(message) {
+            root.applying = false
+            root.notice = message
+        }
     }
 
     Keys.onPressed: (event) => {
@@ -110,7 +124,10 @@ FocusScope {
             anchors.verticalCenter: brand.verticalCenter
             anchors.right: parent.right
             anchors.rightMargin: root.pad
-            text: root.notice
+            width: Math.min(implicitWidth, parent.width - brand.width - 3 * root.pad)
+            horizontalAlignment: Text.AlignRight
+            elide: Text.ElideRight
+            text: root.applying ? "applying…" : root.notice
             color: root.muted
             font.family: root.fontFamily
             font.pixelSize: 13

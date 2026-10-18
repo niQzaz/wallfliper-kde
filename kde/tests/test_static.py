@@ -57,13 +57,25 @@ class Design(unittest.TestCase):
 class PythonQmlContract(unittest.TestCase):
     def setUp(self):
         self.main = (KDE / "main.py").read_text()
+        self.controller = (KDE / "controller.py").read_text()
         self.qml = "\n".join(q.read_text() for q in QML)
 
     def test_controller_calls_exist_as_slots(self):
         used = set(re.findall(r"\bcontroller\.(\w+)", self.qml))
-        slots = set(re.findall(r"@Slot\([^)]*\)\s*\n\s*def (\w+)", self.main))
+        slots = set(re.findall(r"@Slot\([^)]*\)\s*\n\s*def (\w+)", self.controller))
         self.assertTrue(used, "QML never calls the controller?")
         self.assertLessEqual(used, slots, f"QML uses unknown controller methods: {used - slots}")
+
+    def test_qml_signal_handlers_match_real_signals(self):
+        handlers = re.findall(r"function on([A-Z]\w*)\(", self.qml)
+        signals = set(re.findall(r"^\s+(\w+) = Signal\(", self.controller, re.MULTILINE))
+        self.assertIn("applyFailed", signals)
+        for h in handlers:
+            self.assertIn(h[0].lower() + h[1:], signals, f"QML handles on{h} but no such signal")
+
+    def test_controller_is_defined_once_and_only_in_controller_py(self):
+        self.assertNotIn("class Controller", self.main)
+        self.assertIn("class Controller(QObject)", self.controller)
 
     def test_context_properties_are_all_provided(self):
         provided = set(re.findall(r'setContextProperty\("(\w+)"', self.main))
@@ -73,7 +85,8 @@ class PythonQmlContract(unittest.TestCase):
 
 
 class Isolation(unittest.TestCase):
-    BANNED_WORDS = ("swww", "awww", "mpvpaper", "shell=True", "os.system", "hyprctl")
+    BANNED_WORDS = ("swww", "awww", "mpvpaper", "shell=True", "os.system", "os.popen",
+                    "os.spawn", "os.exec", "hyprctl")
 
     def test_no_old_wallpaper_tools_or_shell_in_kde_code(self):
         for p in PY:
@@ -98,23 +111,55 @@ class Isolation(unittest.TestCase):
             self.assertNotRegex(text, r"/home/\w+", p.name)
             self.assertNotIn("xz0", text, p.name)
 
-    def test_stage1_never_changes_the_desktop(self):
+    def test_subprocess_and_the_wallpaper_tool_live_only_in_applier(self):
         for p in PY:
-            self.assertNotIn("subprocess", p.read_text(), p.name)
-            self.assertNotIn("plasma-apply", p.read_text(), p.name)
+            if p.name == "applier.py":
+                continue
+            text = p.read_text()
+            self.assertNotIn("subprocess", text, p.name)
+            self.assertNotIn("plasma-apply", text, p.name)
+
+    def test_applier_never_uses_a_shell_or_a_string_command(self):
+        tree = ast.parse((KDE / "applier.py").read_text())
+        calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
+                 and isinstance(n.func, ast.Attribute)
+                 and isinstance(n.func.value, ast.Name) and n.func.value.id == "subprocess"
+                 and n.func.attr in {"Popen", "run", "call", "check_call", "check_output"}]
+        self.assertTrue(calls, "expected exactly the Popen call")
+        for c in calls:
+            for kw in c.keywords:
+                if kw.arg == "shell":
+                    self.assertIsInstance(kw.value, ast.Constant)
+                    self.assertIs(kw.value.value, False)
+            first = c.args[0]
+            self.assertIsInstance(first, (ast.List, ast.Name), "command must be an argument list")
+
+    def test_dry_run_applier_cannot_start_anything(self):
+        tree = ast.parse((KDE / "applier.py").read_text())
+        cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "DryRunApplier")
+        names = {n.id for n in ast.walk(cls) if isinstance(n, ast.Name)}
+        attrs = {n.attr for n in ast.walk(cls) if isinstance(n, ast.Attribute)}
+        for forbidden in ("subprocess", "PlasmaApplier", "shutil", "os", "Popen", "run"):
+            self.assertNotIn(forbidden, names | attrs)
+
+    def test_main_chooses_exactly_one_applier_from_the_flag(self):
+        main = (KDE / "main.py").read_text()
+        self.assertIn("DryRunApplier() if args.dry_run else PlasmaApplier()", main)
+        self.assertEqual(main.count("PlasmaApplier()"), 1)
 
 
 class Shutdown(unittest.TestCase):
-    def test_finally_tears_down_before_releasing_the_lock(self):
+    def test_finally_tears_down_then_stops_the_worker_then_releases_the_lock(self):
         tree = ast.parse((KDE / "main.py").read_text())
         main = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "main")
         tries = [n for n in ast.walk(main) if isinstance(n, ast.Try) and n.finalbody]
         calls = []
         for stmt in tries[-1].finalbody:
-            if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
-                f = stmt.value.func
-                calls.append(f.id if isinstance(f, ast.Name) else f.attr)
-        self.assertEqual(calls, ["teardown", "release"])
+            for node in ast.walk(stmt):
+                if isinstance(node, ast.Call):
+                    f = node.func
+                    calls.append((node.lineno, f.id if isinstance(f, ast.Name) else f.attr))
+        self.assertEqual([name for _, name in sorted(calls)], ["teardown", "shutdown", "release"])
 
     def test_teardown_deletes_engine_before_notifier(self):
         import types

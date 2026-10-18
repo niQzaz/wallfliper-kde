@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
-"""Wallfliper KDE, stage 1: a minimal keyboard-driven wallpaper picker.
+"""Wallfliper KDE: a minimal keyboard-driven wallpaper picker for Plasma on Wayland.
 
-  Left / Right  move the selection      Enter  confirm (prints the chosen path, exits)
-  Esc           close                   click outside the panel closes; inside keeps it
+  Left / Right  move the selection
+  Enter         apply the selected image as the desktop wallpaper, then close
+                (double-click a card does the same)
+  Esc           close without applying      click outside the panel closes; inside keeps it
 
-Stage 1 does NOT change the desktop wallpaper: confirming only prints the chosen
-file's path to stdout. Applying it is a later stage.
+If applying fails, the panel says why and stays open so you can try again.
 
-  python3 kde/main.py [--dir PATH] [--verbose] [--timeout SECONDS]
-Run it again while it is open to close it (toggle).
+  python3 kde/main.py [--dir PATH] [--dry-run] [--verbose] [--timeout SECONDS]
+
+--dry-run confirms the choice by printing its path and exits; it never starts
+anything and never touches the wallpaper. Run the program again while it is open to
+close it (toggle).
 """
 
 from __future__ import annotations
@@ -22,7 +26,8 @@ _T0 = time.monotonic()
 _ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ROOT))
 
-from kde.collection import load_collection, resolve_selection  # noqa: E402
+from kde.applier import DryRunApplier, PlasmaApplier  # noqa: E402
+from kde.collection import load_collection  # noqa: E402
 from kde.runtime import APP_ID, AppLock, install_signal_quit, teardown  # noqa: E402
 
 _QML = Path(__file__).resolve().parent / "qml" / "Main.qml"
@@ -35,15 +40,21 @@ def log(event: str, detail: str = "") -> None:
               file=sys.stderr, flush=True)
 
 
-def main(argv: list[str] | None = None) -> int:
-    global _verbose
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="wallfliper-kde", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--dir", metavar="PATH", help="wallpaper folder (overrides config.json)")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="print the chosen path instead of applying it; never changes the wallpaper")
     parser.add_argument("--verbose", action="store_true", help="log events to stderr")
     parser.add_argument("--timeout", type=int, default=0, metavar="SECONDS",
                         help="auto-close after N seconds (safety net for first runs; default off)")
-    args = parser.parse_args(argv)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    global _verbose
+    args = build_parser().parse_args(argv)
     _verbose = args.verbose
 
     lock = AppLock()
@@ -51,45 +62,19 @@ def main(argv: list[str] | None = None) -> int:
         print("wallfliper-kde: asked the running instance to close (toggle).", file=sys.stderr)
         return 0
 
-    engine = guard = None
+    engine = guard = controller = None
     try:
         collection = load_collection(args.dir)
         log("collection", f"dir={collection.directory} images={len(collection.entries)} "
                           f"detail={collection.detail!r}")
 
-        from PySide6.QtCore import QObject, QTimer, QUrl, Slot
+        from PySide6.QtCore import QTimer, QUrl
         from PySide6.QtGui import QGuiApplication
         from PySide6.QtQml import QQmlApplicationEngine
 
+        from kde.controller import Controller
+
         entries = collection.entries
-
-        class Controller(QObject):
-            """Everything QML may ask of Python; nothing else is exposed."""
-
-            @Slot(str, str)
-            def log(self, event: str, detail: str) -> None:
-                log(event, detail)
-
-            @Slot()
-            def close(self) -> None:
-                log("close", "")
-                QGuiApplication.quit()
-
-            @Slot(int, result=str)
-            def confirm(self, index: int) -> str:
-                """Empty string on success (the app quits); otherwise a message for the panel."""
-                path, message = resolve_selection(entries, index)
-                if path is None:
-                    log("confirm-failed", message)
-                    return message
-                log("confirm", str(path))
-                try:
-                    sys.stdout.write(f"{path}\n")
-                    sys.stdout.flush()
-                except BrokenPipeError:
-                    pass
-                QGuiApplication.quit()
-                return ""
 
         app = QGuiApplication(sys.argv[:1])
         app.setApplicationName(APP_ID)
@@ -97,7 +82,9 @@ def main(argv: list[str] | None = None) -> int:
         guard = install_signal_quit(app, log)
         app.aboutToQuit.connect(lambda: log("about-to-quit"))
 
-        controller = Controller()
+        applier = DryRunApplier() if args.dry_run else PlasmaApplier()
+        log("applier", type(applier).__name__)
+        controller = Controller(entries, applier, log=log)
         engine = QQmlApplicationEngine()
         ctx = engine.rootContext()
         ctx.setContextProperty("controller", controller)
@@ -118,6 +105,8 @@ def main(argv: list[str] | None = None) -> int:
         return code
     finally:
         teardown(engine, guard, log)
+        if controller is not None:
+            controller.shutdown()
         lock.release()
 
 
