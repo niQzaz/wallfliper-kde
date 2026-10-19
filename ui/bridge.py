@@ -33,6 +33,7 @@ from PySide6.QtGui import QGuiApplication
 from core.backends import (
     BackendError,
     MissingDependencyError,
+    WallpaperBackend,
     get_backend,
     transitions,
 )
@@ -192,7 +193,12 @@ class Controller(QObject):
     # Args: old wallpaper URL, new wallpaper URL, baked shader URL, duration ms.
     shaderTransitionRequested = Signal(str, str, str, int)
 
-    def __init__(self, parent: QObject | None = None) -> None:
+    def __init__(
+        self,
+        parent: QObject | None = None,
+        *,
+        backend: WallpaperBackend | None = None,
+    ) -> None:
         super().__init__(parent)
         self._folder_chooser = FolderChooser(self)
         self._folder_chooser.picked.connect(self._on_folder_picked)
@@ -223,7 +229,8 @@ class Controller(QObject):
         self._color_refilter.setInterval(100)
         self._color_refilter.timeout.connect(self._proxy.invalidateFilter)
 
-        self._backend = get_backend()
+        # An explicit backend skips get_backend() entirely; no argument keeps the old behaviour.
+        self._backend = backend if backend is not None else get_backend()
         self._config: Config = load_config()
         self._status = ""
         # One-at-a-time, low-priority warming of selected videos' first frames
